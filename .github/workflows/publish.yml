@@ -1,0 +1,78 @@
+name: Publish discs.astermediaplayer.com
+
+# Builds the Disc Menus catalogue site from peppy6582/jellydisc-menus for this address. The catalogue's data stays
+# published at peppy6582.github.io/jellydisc-menus/, which the plugin and every installed menu use: this site is a
+# second copy for people to browse, with the same menus.
+on:
+  repository_dispatch:
+    types: [catalogue-updated]   # sent by jellydisc-menus after each publish
+  schedule:
+    - cron: "17 6 * * *"         # daily, in case a dispatch is missed
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  SITE_URL: https://discs.astermediaplayer.com/
+  SITE_PREFIX: /
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: catalogue
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: peppy6582/jellydisc-menus
+          path: catalogue
+          fetch-depth: 0          # older menu revisions come from git history
+      - name: Read the pinned plugin commit
+        id: lock
+        run: echo "ref=$(jq -r .ref plugin.lock.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: peppy6582/jellydisc
+          ref: ${{ steps.lock.outputs.ref }}
+          path: catalogue/plugin
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: catalogue/package-lock.json
+      - run: pip install jsonschema
+      - name: Build the catalogue (checks every menu first)
+        run: python3 tools/build_index.py --plugin plugin --out _catalogue
+      - run: npm ci --no-audit --no-fund
+      - name: Build the site and its search index
+        run: npm run build
+      - name: Take a picture of each menu's preview for the cards
+        run: |
+          npx playwright install --with-deps chromium
+          node tools/thumbnails.mjs --site _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: catalogue/_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
